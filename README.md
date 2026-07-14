@@ -8,7 +8,6 @@ Renders print-accurate transparent PNGs from real-world dimensions (cm/DPI) — 
 These stencils are designed for use with AR visualization tools. Overlay them on real INK's notebook paper surface https://sites.google.com/view/paperstackpro/home#h.s669t9tdrs5j 
 
 Perfect for:
-https://sites.google.com/view/paperstackpro/home#h.s669t9tdrs5j
 - Pre-visualization before cutting/engraving
 - Pattern layout planning
 - Digital-physical prototyping workflows
