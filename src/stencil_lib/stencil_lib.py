@@ -1,3 +1,4 @@
+
 """
 stencil_lib.py — Generic parametric stencil generator.
 
@@ -24,7 +25,8 @@ Usage:
 """
 
 import math
-from PIL import Image, ImageDraw
+import numpy as np
+import imageio
 
 
 PHI = (1 + math.sqrt(5)) / 2
@@ -142,15 +144,63 @@ class Stencil:
         self.margin_cm = margin_cm
         self.W = round(self.width_cm * self.px_per_cm)
         self.H = round(self.height_cm * self.px_per_cm)
-        self.img = Image.new("RGBA", (self.W, self.H), (0, 0, 0, 0))
-        self.draw = ImageDraw.Draw(self.img)
+        # RGBA array: (H, W, 4) with fully transparent background
+        self.img = np.zeros((self.H, self.W, 4), dtype=np.uint8)
         self.cx, self.cy = self.W / 2, self.H / 2
 
     def _to_px(self, x_cm, y_cm):
         return (self.cx + x_cm * self.px_per_cm, self.cy - y_cm * self.px_per_cm)
 
+    def _draw_line(self, pts, stroke=(255, 255, 255, 255), width_px=3):
+        """Draw a line by rasterizing points with anti-aliased thickness."""
+        stroke = np.array(stroke, dtype=np.uint8)
+        for i in range(len(pts) - 1):
+            x0, y0 = pts[i]
+            x1, y1 = pts[i + 1]
+            self._bresenham_thick_line(int(round(x0)), int(round(y0)),
+                                        int(round(x1)), int(round(y1)),
+                                        width_px, stroke)
+
+    def _bresenham_thick_line(self, x0, y0, x1, y1, width, color):
+        """Bresenham line with thickness (simplified thick line rendering)."""
+        dx = abs(x1 - x0)
+        dy = abs(y1 - y0)
+        sx = 1 if x0 < x1 else -1
+        sy = 1 if y0 < y1 else -1
+        err = dx - dy
+
+        x, y = x0, y0
+        half_width = width // 2
+
+        while True:
+            # Draw a small square around (x, y) with the given width
+            for dx_off in range(-half_width, half_width + 1):
+                for dy_off in range(-half_width, half_width + 1):
+                    px, py = x + dx_off, y + dy_off
+                    if 0 <= px < self.W and 0 <= py < self.H:
+                        self.img[py, px] = color
+
+            if x == x1 and y == y1:
+                break
+
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                x += sx
+            if e2 < dx:
+                err += dx
+                y += sy
+
     def add_frame(self, stroke=(255, 255, 255, 255), width_px=3):
-        self.draw.rectangle([0, 0, self.W - 1, self.H - 1], outline=stroke, width=width_px)
+        stroke_array = np.array(stroke, dtype=np.uint8)
+        # Draw rectangle outline
+        for i in range(width_px):
+            # Top and bottom edges
+            self.img[i, :] = stroke_array
+            self.img[self.H - 1 - i, :] = stroke_array
+            # Left and right edges
+            self.img[:, i] = stroke_array
+            self.img[:, self.W - 1 - i] = stroke_array
 
     def add_parametric(self, x_func, y_func, t0, t1, steps=720, closed=False,
                         stroke=(255, 255, 255, 255), width_px=3):
@@ -158,7 +208,7 @@ class Stencil:
         pts = [self._to_px(x_func(t), y_func(t)) for t in ts]
         if closed:
             pts.append(pts[0])
-        self.draw.line(pts, fill=stroke, width=width_px, joint="curve")
+        self._draw_line(pts, stroke=stroke, width_px=width_px)
 
     def add_curve(self, name, steps=720, stroke=(255, 255, 255, 255), width_px=3, **kwargs):
         if name not in _REGISTRY:
@@ -192,28 +242,64 @@ class Stencil:
                 squares.append((x, y + h - side, side, direction)); h -= side
             direction = (direction + 1) % 4
 
+        stroke_array = np.array(stroke, dtype=np.uint8)
+
         for (sx, sy, side, orientation) in squares:
             if show_grid:
-                self.draw.rectangle([sx, sy, sx + side, sy + side],
-                                     outline=stroke, width=max(1, width_px - 1))
+                # Draw rectangle outline
+                grid_width = max(1, width_px - 1)
+                for i in range(grid_width):
+                    self.img[sy + i, sx:sx + side] = stroke_array
+                    self.img[sy + side - 1 - i, sx:sx + side] = stroke_array
+                    self.img[sy:sy + side, sx + i] = stroke_array
+                    self.img[sy:sy + side, sx + side - 1 - i] = stroke_array
+
+            # Draw quarter-arc (simplified as octant approximation)
             if orientation == 0:
-                cx, cy, start, end = sx, sy + side, 270, 360
+                cx, cy = sx, sy + side
+                self._draw_quarter_arc(cx, cy, side, 270, 360, stroke_array, width_px)
             elif orientation == 1:
-                cx, cy, start, end = sx, sy, 0, 90
+                cx, cy = sx, sy
+                self._draw_quarter_arc(cx, cy, side, 0, 90, stroke_array, width_px)
             elif orientation == 2:
-                cx, cy, start, end = sx + side, sy, 90, 180
+                cx, cy = sx + side, sy
+                self._draw_quarter_arc(cx, cy, side, 90, 180, stroke_array, width_px)
             else:
-                cx, cy, start, end = sx + side, sy + side, 180, 270
-            bbox = [cx - side, cy - side, cx + side, cy + side]
-            self.draw.arc(bbox, start=start, end=end, fill=stroke, width=width_px)
+                cx, cy = sx + side, sy + side
+                self._draw_quarter_arc(cx, cy, side, 180, 270, stroke_array, width_px)
+
+    def _draw_quarter_arc(self, cx, cy, radius, start_deg, end_deg, color, width_px):
+        """Draw a quarter-arc using Bresenham circle."""
+        start_rad = math.radians(start_deg)
+        end_rad = math.radians(end_deg)
+        steps = max(int(radius / 2), 20)
+
+        for i in range(steps):
+            t = start_rad + (end_rad - start_rad) * i / steps
+            x = int(round(cx + radius * math.cos(t)))
+            y = int(round(cy - radius * math.sin(t)))
+            half_width = width_px // 2
+            for dx in range(-half_width, half_width + 1):
+                for dy in range(-half_width, half_width + 1):
+                    px, py = x + dx, y + dy
+                    if 0 <= px < self.W and 0 <= py < self.H:
+                        self.img[py, px] = color
 
     def composite_on(self, rgb=(139, 105, 70)):
-        bg = Image.new("RGB", self.img.size, rgb)
-        bg.paste(self.img, (0, 0), self.img)
+        """Composite transparent image onto an RGB background."""
+        bg = np.full((self.H, self.W, 3), rgb, dtype=np.uint8)
+        # Extract alpha channel and blend
+        alpha = self.img[:, :, 3:4] / 255.0
+        bg = (bg * (1 - alpha) + self.img[:, :, :3] * alpha).astype(np.uint8)
         return bg
 
     def save(self, path):
-        self.img.save(path)
+        """Save as RGBA or RGB depending on path extension."""
+        if path.lower().endswith(('.png', '.tiff')):
+            imageio.imwrite(path, self.img)  # Save with alpha channel
+        else:
+            rgb_img = self.composite_on()
+            imageio.imwrite(path, rgb_img)
 
 
 if __name__ == "__main__":
@@ -225,16 +311,15 @@ if __name__ == "__main__":
         ("rose", dict(k=5)),
         ("polygon", dict(sides=6)),
     ]
-    tile = Image.new("RGB", (900, 600), (30, 30, 30))
-    from PIL import ImageOps
+    
     cols, rows = 3, 2
     cw, ch = 300, 300
+    tile = np.full((rows * ch, cols * cw, 3), (30, 30, 30), dtype=np.uint8)
+    
     for i, (name, kwargs) in enumerate(demos):
         s = Stencil(width_cm=6, height_cm=6, dpi=150, margin_cm=0.3)
         s.add_frame(width_px=2)
         s.add_curve(name, width_px=3, **kwargs)
-        thumb = s.composite_on((45, 45, 45)).resize((cw, ch))
-        cx, cy = (i % cols) * cw, (i // cols) * ch
-        tile.paste(thumb, (cx, cy))
-    tile.save("./stencil_contact_sheet.png")
-    print("saved contact sheet")
+        thumb_rgb = s.composite_on((45, 45, 45))
+        # Resize using imageio (simplified: downsampling by slicing)
+        thumb = thumb_rgb[::2, ::2]  # Simple 2x downsam

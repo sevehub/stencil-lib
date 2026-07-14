@@ -2,7 +2,7 @@
 dist/
 build/
 *.egg-info/
-
+PIL/
 # Virtual environments
 venv/
 .env/
