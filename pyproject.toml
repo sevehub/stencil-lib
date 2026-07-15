@@ -10,5 +10,10 @@ Renders print-accurate transparent PNGs from real-world dimensions (cm/DPI) — 
 Built for AR overlays ."""
 requires-python = ">=3.10"
 
+dependencies = [
+    "numpy",
+    "imageio",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]
